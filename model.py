@@ -45,13 +45,31 @@ class PoseHead(nn.Module):
     def forward(self,x):
         return self.pose_head(x)
     
+# class CaptionHead(nn.Module):
+#     def __init__(self, latent_dim, vocab_size=5000):
+#         super().__init__()
+#         self.caption_head = nn.Sequential(
+#             nn.Linear(latent_dim, 256),
+#             nn.ReLU(),
+#             nn.Linear(256, vocab_size)
+#         )
+#     def forward(self,x):
+#         return self.caption_head(x)
+
 class CaptionHead(nn.Module):
-    def __init__(self, latent_dim, vocab_size=5000):
+    def __init__(self, latent_dim, vocab_size, max_len=50):
         super().__init__()
+        self.max_len = max_len
+        self.vocab_size = vocab_size
+        
         self.caption_head = nn.Sequential(
             nn.Linear(latent_dim, 256),
             nn.ReLU(),
-            nn.Linear(256, vocab_size)
+            nn.Linear(256, max_len * vocab_size)  # Output size matches sequence length * vocab size
         )
-    def forward(self,x):
-        return self.caption_head(x)
+    
+    def forward(self, x):
+        batch_size = x.size(0)
+        out = self.caption_head(x)
+        # Reshape to [batch_size, max_len, vocab_size]
+        return out.view(batch_size, self.max_len, self.vocab_size)
