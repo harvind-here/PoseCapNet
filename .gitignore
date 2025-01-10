@@ -1,2 +1,7 @@
-  datasets/
-  datasets/coco/
+mini_coco/
+__pycache__/
+.ipynb_checkpoints/
+CodeCitations.md
+yolov8n.pt
+main_webcam.py
+
