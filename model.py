@@ -1,75 +1,95 @@
-import torch 
+import torch
 import torch.nn as nn
+import torchvision.models as models
+from transformers import BertTokenizer, BertModel, BertConfig
 
-class Encoder(nn.Module):
-    def __init__(self, latent_dim):
+class ImageEncoder(nn.Module):
+    def __init__(self):
         super().__init__()
-        self.encoder = nn.Sequential(
-            nn.Conv2d(3, 32, 3, stride=2, padding=1),
-            nn.ReLU(),
-            nn.Conv2d(32, 64, 3, stride=2, padding=1),
-            nn.ReLU(),
-            nn.Conv2d(64, 128, 3, stride=2, padding=1),
-            nn.ReLU(),
-            nn.Flatten(),
-            nn.Linear(128*4*4, latent_dim)
-        )
-    def forward(self,x):
-        return self.encoder(x)
-
-class Decoder(nn.Module):
-    def __init__(self, latent_dim):
-        super().__init__()
-        self.decoder = nn.Sequential(
-            nn.Linear(latent_dim, 128*4*4),
-            nn.ReLU(),
-            nn.Unflatten(1, (128, 4, 4)),
-            nn.ConvTranspose2d(128, 64, 3, stride=2, padding=1, output_padding=1),
-            nn.ReLU(),
-            nn.ConvTranspose2d(64, 32, 3, stride=2, padding=1, output_padding=1),
-            nn.ReLU(),
-            nn.ConvTranspose2d(32, 3, 3, stride=2, padding=1, output_padding=1),
-            nn.Sigmoid()
-        )
-    def forward(self,x):
-        return self.decoder(x)
-
-class PoseHead(nn.Module):
-    def __init__(self, latent_dim, num_keypoints=17, keypoint_dims=3):  # Changed to include visibility flag
-        super().__init__()
-        self.pose_head = nn.Sequential(
-            nn.Linear(latent_dim, 256),
-            nn.ReLU(),
-            nn.Linear(256, num_keypoints * keypoint_dims)  # Output: x, y, visibility for each keypoint
-        )
-    def forward(self,x):
-        return self.pose_head(x)
-    
-# class CaptionHead(nn.Module):
-#     def __init__(self, latent_dim, vocab_size=5000):
-#         super().__init__()
-#         self.caption_head = nn.Sequential(
-#             nn.Linear(latent_dim, 256),
-#             nn.ReLU(),
-#             nn.Linear(256, vocab_size)
-#         )
-#     def forward(self,x):
-#         return self.caption_head(x)
-
-class CaptionHead(nn.Module):
-    def __init__(self, latent_dim, vocab_size, max_len=50):
-        super().__init__()
-        self.max_len = max_len
-        self.vocab_size = vocab_size
+        # Fix weights parameter
+        resnet = models.resnet34(weights=models.ResNet34_Weights.IMAGENET1K_V1)
+        # Remove final avgpool and fc
+        self.features = nn.Sequential(*list(resnet.children())[:-2])
+        # Add shared feature projection
+        self.shared_conv = nn.Conv2d(512, 512, 1)
         
-        self.caption_head = nn.Sequential(
-            nn.Linear(latent_dim, 256),
-            nn.ReLU(),
-            nn.Linear(256, max_len * vocab_size)  # Output size matches sequence length * vocab size
-        )
-    
     def forward(self, x):
-        batch_size = x.size(0)
-        out = self.caption_head(x)
-        # Reshape to [batch_size, max_len, vocab_size]
-        return out.view(batch_size, self.max_len, self.vocab_size)
+        # x: [B, 3, 224, 224]
+        features = self.features(x)  # [B, 512, 7, 7]
+        shared_features = self.shared_conv(features)  # [B, 512, 7, 7]
+        return shared_features
+
+class CaptionDecoder(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
+        self.vocab_size = self.tokenizer.vocab_size
+        self.bert_config = BertConfig(
+            vocab_size=self.vocab_size,
+            hidden_size=768,
+            num_hidden_layers=6,
+            num_attention_heads=8,
+            intermediate_size=2048
+        )
+        self.bert = BertModel(self.bert_config)
+        self.spatial_proj = nn.Conv2d(512, 768, 1)
+        # Add output projection
+        self.output_proj = nn.Linear(768, self.vocab_size)
+        
+    def forward(self, features, captions=None):
+        B = features.size(0)
+        spatial_features = self.spatial_proj(features)  # [B, 768, 7, 7]
+        sequence_features = spatial_features.flatten(2).transpose(1, 2)  # [B, 49, 768]
+        
+        if captions is not None:
+            encoded = self.tokenizer(
+                captions, 
+                padding=True,
+                truncation=True,
+                max_length=49,
+                return_tensors='pt'
+            ).to(features.device)
+            
+            # Match sequence length to encoded input
+            sequence_features = sequence_features[:, :encoded.input_ids.size(1), :]
+            attention_mask = torch.ones((B, sequence_features.size(1)), device=features.device)
+            
+            bert_outputs = self.bert(
+                inputs_embeds=sequence_features,
+                attention_mask=attention_mask
+            )
+            logits = self.output_proj(bert_outputs.last_hidden_state)
+            return logits
+        else:
+            bert_outputs = self.bert(inputs_embeds=sequence_features)
+            return self.output_proj(bert_outputs.last_hidden_state)
+        
+    def get_vocab_size(self):
+        return self.vocab_size
+
+class HRNetPose(nn.Module):
+    def __init__(self, num_joints=17):
+        super().__init__()
+        # Use spatial features directly
+        self.conv1 = nn.Conv2d(512, 256, 3, padding=1)
+        self.bn1 = nn.BatchNorm2d(256)
+        self.relu = nn.ReLU(inplace=True)
+        
+        self.high_res = nn.Sequential(
+            nn.Conv2d(256, 128, 3, padding=1),
+            nn.BatchNorm2d(128),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(128, 64, 3, padding=1),
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True),
+            nn.AdaptiveAvgPool2d((1, 1)),  # Global pooling
+            nn.Flatten(),
+            nn.Linear(64, num_joints * 3)  # Output x,y coordinates
+        )
+        
+    def forward(self, x):
+        # x: [B, 512, 7, 7]
+        x = self.conv1(x)  # [B, 256, 7, 7]
+        x = self.bn1(x)
+        x = self.relu(x)
+        return self.high_res(x)  # [B, num_joints * 2]
