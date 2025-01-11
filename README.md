@@ -22,7 +22,7 @@ Training specs:
 ## Test Results
 Model evaluation metrics:
 - Pose MSE: 0.1210 (good - within 0.1-0.15 range)
-- BLEU-1: 0.2246 (needs improvement, target >0.4)      ----- work on BERT optimization i think
+- BLEU-1: 0.2246 (needs improvement, target >0.4) -----shud work on BERT (layer norm/grad clippin)
 - BLEU-4: 0.1758 (close to target 0.2)
 
 ## Quick Setup
